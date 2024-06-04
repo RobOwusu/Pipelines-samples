@@ -1,0 +1,60 @@
+stages:
+    - mitigation_pipe
+
+mitigation_pipe:
+    image: openjdk:8
+    stage: mitigation_pipe
+    before_script:
+        - wget -q -O veracode-wrapper.jar https://repo1.maven.org/maven2/com/veracode/vosp/api/wrappers/vosp-api-wrappers-java/21.9.8.2/vosp-api-wrappers-java-21.9.8.2.jar
+    script:
+        - |
+            VERACODE_ID=
+VERACODE_KEY=
+appprofile=
+rm -f baseline.json
+echo '{"findings":[' >> baseline.json
+app_ID=$(java -jar veracode-wrapper.jar -vid $VERACODE_ID -vkey $VERACODE_KEY -action getapplist | grep -w $appprofile | sed -n 's/.* app_id=\"\([0-9]*\)\" .*/\1/p')
+echo $app_ID
+#pega o id do ultimo scan
+build_ID=$(java -jar veracode-wrapper.jar -vid $VERACODE_ID -vkey $VERACODE_KEY -action getbuildinfo -appid $app_ID | sed '2 s/xmlns=".*"//g' | xmllint --xpath "string(/buildinfo/build/@build_id)" -) 
+#faz o request para obter os resultados da analise com buildID obtido anteriormente
+java -jar veracode-wrapper.jar -vid $VERACODE_ID -vkey $VERACODE_KEY -action detailedreport -buildid $build_ID -outputfilepath results.xml
+xmlResults=$(cat results.xml | sed '2 s/xmlns=".*"//g')
+flawCount=$(echo ${xmlResults} | xmllint --xpath "count(/detailedreport/severity/category/cwe/staticflaws/flaw)" -)
+declare -A sevDesc
+sevDesc[0]="Info"
+sevDesc[1]="VeryLow"
+sevDesc[2]="Low"
+sevDesc[3]="Medium"
+sevDesc[4]="High"
+sevDesc[5]="VeryHigh"
+for ((i=1; i<=flawCount; i++)); do
+    flaw=$(echo ${xmlResults} | xmllint --xpath '(/detailedreport/severity/category/cwe/staticflaws/flaw)['"$i"']' -)         
+    mitigation_status=$(echo ${flaw} | xmllint --xpath 'string(/flaw/@mitigation_status)' -)    
+    if [[ $mitigation_status != "none" ]]; then
+        cweid=$(echo ${flaw} | xmllint --xpath 'string(/flaw/@cweid)' -)        
+        description=$(echo ${flaw} | xmllint --xpath 'string(/flaw/@description)' - | sed $'s/[^[:print:]\t]//g')
+        sourcefilepath=$(echo ${flaw} | xmllint --xpath 'string(/flaw/@sourcefilepath)' -)
+        sourcefile=$(echo ${flaw} | xmllint --xpath 'string(/flaw/@sourcefile)' -)
+        fullpath=$sourcefilepath$sourcefile
+        functionpttr=$(echo ${flaw} | xmllint --xpath 'string(/flaw/@functionprototype)' -)
+        line=$(echo ${flaw} | xmllint --xpath 'string(/flaw/@line)' -)
+        scope=$(echo ${flaw} | xmllint --xpath 'string(/flaw/@scope)' -)
+        issueid=$(echo ${flaw} | xmllint --xpath 'string(/flaw/@issueid)' -)
+        issuetype=$(echo ${flaw} | xmllint --xpath 'string(/flaw/@categoryname)' -) 
+        issuetypeid=$(echo ${flaw} | xmllint --xpath 'string(/flaw/@type)' -) 
+        severity=$(echo ${flaw} | xmllint --xpath 'string(/flaw/@severity)' -)
+        name=$(echo ${flaw} | xmllint --xpath 'string(/flaw/@categoryname)' -)
+        jsonmid='{"cwe_id":"%s","display_text":"","files":{"source_file":{"file":"%s","function_name":"","function_prototype":"%s","line": %s,"qualified_function_name":"","scope":"%s"}},"issue_id": %s,"issue_type":"%s","issue_type_id":"%s","severity": '%s',"title":"%s"},'
+        jsonmidformat=$(printf "$jsonmid" "$cweid" "$fullpath" "$functionpttr" "$line" "$scope" "$issueid" "$issuetype" "$issuetypeid" "$severity" "$name" )
+        echo -e $jsonmidformat >> baseline.json
+    fi;
+done
+sed -i '$ s/.$//' baseline.json
+echo ']}' >> baseline.json
+
+        
+
+
+
+
